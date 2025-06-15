@@ -16,6 +16,25 @@ struct edid_cta_mode
     int refresh, hor_freq_hz, pixclk_khz;
 };
 
+struct detailed_timing {
+    int pixel_clock;    // 像素时钟(kHz)
+    int h_active;
+    int h_blank;
+    int v_active;
+    int v_blank;
+    int h_sync_off;     // H同步开始位置（相对h_active）
+    int h_sync_pulse;   // H同步脉冲宽度
+    int v_sync_off;     // V同步开始位置（相对v_active）
+    int v_sync_pulse;   // V同步脉冲宽度
+    int h_size_mm;      // 水平尺寸(mm)
+    int v_size_mm;      // 垂直尺寸(mm)
+    int h_border;       // 水平边框像素
+    int v_border;       // 垂直边框行数
+    int interlaced;     // 是否隔行
+    int h_sync_polarity; // H同步极性(1=正,0=负)
+    int v_sync_polarity; // V同步极性(1=正,0=负)
+};
+
 static struct edid_cta_mode edid_cta_modes1[] = {
     /* VIC 1 */
     {"Modeline \"640x480_60.00\" 25.175 640 656 752 800 480 490 492 525 +HSync +VSync", "640x480@60Hz 4:3", 60, 31469, 25175},
@@ -412,6 +431,83 @@ int findElementWithField(const char *arr[], int arrSize, const char *field)
     return -1;
 }
 
+// 详细时序解析函数
+static int parse_detailed_timing(const unsigned char *desc, struct detailed_timing *dt)
+{
+    // 检查前两个字节是否为0（非时序描述符）
+    if (desc[0] == 0 && desc[1] == 0)
+        return 0;
+
+    memset(dt, 0, sizeof(*dt));
+
+    // 解析像素时钟（单位：10kHz）
+    dt->pixel_clock = (desc[1] << 8 | desc[0]) * 10; // 转换为kHz
+
+    // 水平参数
+    dt->h_active  = ((desc[4] & 0xf0) << 4) | desc[2];
+    dt->h_blank   = ((desc[4] & 0x0f) << 8) | desc[3];
+
+    // 垂直参数
+    dt->v_active  = ((desc[7] & 0xf0) << 4) | desc[5];
+    dt->v_blank   = ((desc[7] & 0x0f) << 8) | desc[6];
+
+    // 同步参数
+    dt->h_sync_off   = ((desc[11] & 0xc0) << 2) | desc[8];
+    dt->h_sync_pulse = ((desc[11] & 0x30) << 4) | desc[9];
+    dt->v_sync_off   = ((desc[11] & 0x0c) << 2) | ((desc[10] & 0xf0) >> 4);
+    dt->v_sync_pulse = ((desc[11] & 0x03) << 4) | (desc[10] & 0x0f);
+
+    // 图像尺寸
+    dt->h_size_mm = desc[14];
+    dt->v_size_mm = desc[15];
+
+    // 边框
+    dt->h_border = desc[16];
+    dt->v_border = desc[17];
+
+    // 标志位解析
+    dt->interlaced = (desc[17] & 0x80) >> 7;
+    dt->h_sync_polarity = (desc[17] & 0x02) >> 1;
+    dt->v_sync_polarity = (desc[17] & 0x04) >> 2;
+
+    return 1;
+}
+
+// 生成Modeline字符串
+static void generate_modeline(const struct detailed_timing *dt, char *buf, size_t len)
+{
+    int h_total = dt->h_active + dt->h_blank;
+    int v_total = dt->v_active + dt->v_blank;
+
+    double pixclk_mhz = dt->pixel_clock / 1000.0;
+
+    // 计算各阶段位置
+    int h_begin = dt->h_active + dt->h_sync_off;
+    int h_end = h_begin + dt->h_sync_pulse;
+
+    int v_begin = dt->v_active + dt->v_sync_off;
+    int v_end = v_begin + dt->v_sync_pulse;
+
+    // 生成同步极性字符串
+    char h_sync = dt->h_sync_polarity ? '+' : '-';
+    char v_sync = dt->v_sync_polarity ? '+' : '-';
+
+    snprintf(buf, len,
+        "Modeline \"%dx%d_%.2f\" %.2f %d %d %d %d %d %d %d %d %cHSync %cVSync",
+        dt->h_active, dt->v_active,
+        (dt->pixel_clock * 1000.0) / (h_total * v_total), // 刷新率
+        pixclk_mhz,
+        dt->h_active,
+        dt->h_active + dt->h_sync_off,
+        dt->h_active + dt->h_sync_off + dt->h_sync_pulse,
+        h_total,
+        dt->v_active,
+        dt->v_active + dt->v_sync_off,
+        dt->v_active + dt->v_sync_off + dt->v_sync_pulse,
+        v_total,
+        h_sync, v_sync);
+}
+
 static int get_est_timing(unsigned char *block)
 {
     int idx = 0;
@@ -563,6 +659,21 @@ static int get_std_timing(unsigned char *block)
     int i;
     char *mode = NULL;
     int found = 0;
+
+    // 检查 block 是否全为 0x00
+    int all_zero = 1;
+    for (i = 0; i < 2; i++) {
+        if (block[i] != 0x00) {
+            all_zero = 0;
+            break;
+        }
+    }
+
+    if (all_zero) {
+        // 如果 block 全为 0x00，直接返回未找到
+        return 0;
+    }
+
     for (i = 0; i < DMT_SIZE; i++)
     {
         unsigned int std_2byte_code = block[0] << 8 | block[1];
@@ -730,11 +841,27 @@ int main()
 
     // block 1: est timing
     printf("#Automatically generated, please do not edit\r\n");
+
+    /*生成 Detailed Timing 字段*/
+    printf("#Detailed Timing Descriptors\n");
+    const unsigned char *desc = data.edid_data + 0x36;
+    for (int i = 0; i < 4; i++, desc += 18) {
+        struct detailed_timing dt;
+        if (parse_detailed_timing(desc, &dt)) {
+            char modeline[256];
+            generate_modeline(&dt, modeline, sizeof(modeline));
+            printf("%s\n", modeline);
+        }
+    }
+
+    /*生成 EST Timing 字段*/
     printf("#EST Timing\r\n");
     block = data.edid_data + 0x23;
     ret = get_est_timing(block);
     if (!ret)
         perr("get_est_timing fail!\r\n");
+
+    /*生成 TD(DMT) Timing 和扩展快中的 Timing 字段*/
     // block 2:std timing
     printf("#STD(DMT) Timing\r\n");
     block = data.edid_data + 0x26;

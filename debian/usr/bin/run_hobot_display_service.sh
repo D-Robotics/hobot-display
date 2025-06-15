@@ -210,56 +210,111 @@ function cfg_update {
 
 # vim: filetype=sh
 
+filter_unsupported_modes() {
+    local mode_line="$1"
+
+    # 提取分辨率和刷新率
+    resolution=$(echo "$mode_line" | awk '{print $2}' | tr -d '"')
+    # echo "resolution = $resolution" >&2
+    refresh_rate=$(echo "$resolution" | awk -F'_' '{print $2}' | awk -F'.' '{print $1}')
+    # echo "refresh_rate = $refresh_rate" >&2
+
+    # 提取分辨率和刷新率
+    resolution=$(echo "$mode_line" | awk '{print $2}' | tr -d '"')
+    # echo "resolution = $resolution" >&2
+
+    # 新增刷新率提取整数和小数
+    refresh_info=$(echo "$resolution" | awk -F'_' '{print $2}')
+    refresh_rate=$(echo "$refresh_info" | awk -F'.' '{print $1}')
+    refresh_rate_decimal=$(echo "$refresh_info" | awk -F'.' '{print $2}')
+
+    # 调试用
+    # echo "DEBUG: resolution=$resolution, refresh_info=$refresh_info, refresh_rate=$refresh_rate, refresh_rate_decimal=$refresh_rate_decimal" >&2
+
+    width=$(echo "$resolution" | awk -F'x' '{print $1}')
+    # echo "width = $width" >&2
+    height=$(echo "$resolution" | awk -F'x|_' '{print $2}')
+    # echo "height = $height" >&2
+
+    # 验证提取的参数是否为数字
+    if ! [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]]; then
+      #   echo "ERROR: Invalid resolution: $resolution" >&2
+        echo "$mode_line"  # 过滤非Modeline的打印，此部分一般为带 # 的注释。
+        return 1
+    fi
+
+    # 计算分辨率乘积
+    local max_pixel_area=$((1920 * 1080))  # 基准分辨率乘积
+    local current_pixel_area=$((width * height))
+
+    # 应用过滤规则：分辨率乘积 > 1920x1080 或 刷新率 > 60 或者 刷新率不为整数的
+    if [[ "$current_pixel_area" -gt "$max_pixel_area" || "$refresh_rate" -gt 60 ]]; then
+      #   echo "DEBUG: Filtering high resolution: $resolution (width=$width, height=$height)" >&2
+      #   echo "#$mode_line"   # 调试打印
+      sed -E 's/^[[:blank:]]*/        #/' <<< "$mode_line" # 屏蔽超高分辨率和高刷模式
+    elif [[ "$refresh_rate" -gt 60 ]]; then
+      #   屏蔽超高分辨率和高刷模式
+      #   echo "#$mode_line"  # 调试打印
+      sed -E 's/^[[:blank:]]*/        #/' <<< "$mode_line"
+    # 检查刷新率是否为整数
+   #  elif [[ -n "$refresh_rate_decimal" && "$refresh_rate_decimal" != "0" && "$refresh_rate_decimal" != "00" && "$refresh_rate_decimal" != "000" ]]; then
+   #      # 刷新率不是整数，屏蔽此模式
+   #      sed -E 's/^[[:blank:]]*/        #/' <<< "$mode_line"
+   #      return 0
+    else
+      #   echo "DEBUG: Allowing mode: $resolution" >&2
+        echo "$mode_line"   # 保留支持的模式
+    fi
+}
+
+
 function auto_edid() {
-   modes=$(get_edid_raw_data | edid-decode-linux-tv -X | grep "Modeline" | sed 's/^[ \t]*//g' | sed 's/.*/"&"/')
-   if [ -z "$modes" ]; then
-      #default timing genrate using https://tomverbeure.github.io/video_timings_calculator
-      modes=("	Modeline \"1920x1080_30\" 74.25 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
-      Modeline \"1920x1080_60\" 148.5 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
-      Modeline \"1280x720_60\" 74.25 1280 1390 1430 1650 720 725 730 750 +HSync +VSync
-      Modeline \"1280x720_30\" 74.25 1280 3040 3080 3300 720 725 730 750 +HSync +VSync
-      Modeline \"1024x768_60\" 65 1024 1048 1184 1344 768 771 777 806 -HSync -VSync
-      Modeline \"1024x768_30\" 25.932 1024 1032 1064 1104 768 769 777 783 +HSync -VSync
-      Modeline \"800x600_60.32\" 40 800 840 968 1056 600 601 605 628 +HSync +VSync
-      Modeline \"640x480_75\" 31.5 640 656 720 840 480 481 484 500 -HSync -VSync"
+    modes=$(get_edid_raw_data | edid-decode-linux-tv -X | grep "Modeline" | sed 's/^[ \t]*//g' | sed 's/.*/"&"/')
+    if [ -z "$modes" ]; then
+        #default timing genrate using https://tomverbeure.github.io/video_timings_calculator
+        modes=("    Modeline \"1920x1080_30\" 74.25 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
+        Modeline \"1920x1080_60\" 148.5 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
+        Modeline \"1280x720_60\" 74.25 1280 1390 1430 1650 720 725 730 750 +HSync +VSync
+        Modeline \"1280x720_30\" 74.25 1280 3040 3080 3300 720 725 730 750 +HSync +VSync
+        Modeline \"1024x768_60\" 65 1024 1048 1184 1344 768 771 777 806 -HSync -VSync
+        Modeline \"1024x768_30\" 25.932 1024 1032 1064 1104 768 769 777 783 +HSync -VSync
+        Modeline \"800x600_60.32\" 40 800 840 968 1056 600 601 605 628 +HSync +VSync
+        Modeline \"640x480_75\" 31.5 640 656 720 840 480 481 484 500 -HSync -VSync"
+        )
+    fi
+    modes_array=()
+    filtered_output=()
 
-      )
-   fi
-   modes_array=()
-   filtered_output=()
-
-   template_monitor='
+    template_monitor='
 Section "Monitor"
     Identifier "default"
     #replace_1
 EndSection
 '
 
-   while IFS= read -r line; do
-      modes_array+=("$line")
-   done <<<"$modes"
+    sorted_hobot_output=$(hobot_parse_std_timing | python3 /usr/bin/process_hobot_output.py)
+    # echo "$sorted_hobot_output" >&2
+    while IFS= read -r line; do
+        modes_array+=("$line")
+    done <<< "$sorted_hobot_output"
 
-   while IFS= read -r line; do
-      modes_array+=("$line")
-   done < <(hobot_parse_std_timing)
+    for item in "${modes_array[@]}"; do
+        if [[ ! "$item" =~ "Interlace" ]]; then
+            filtered_output+=("$(filter_unsupported_modes "$item")")
+            # filtered_output+=("$item")
+        fi
+    done
 
-   for item in "${modes_array[@]}"; do
-      if [[ ! "$item" =~ "Interlace" ]]; then
-         filtered_output+=("$item")
-      fi
-   done
+    result=""
+    for item in "${filtered_output[@]}"; do
+        result="$result$(echo "$item" | sed 's/^"\(.*\)"$/\1/')"$'\n'
+    done
 
-   result=""
-   for item in "${filtered_output[@]}"; do
-      #echo $(echo "$item" | sed 's/^"\(.*\)"$/\1/')
-      result="$result$(echo "$item" | sed 's/^"\(.*\)"$/\1/')"$'\n'
-   done
+    monitor_result="${template_monitor//#replace_1/$result}"
 
-   monitor_result="${template_monitor//#replace_1/$result}"
+    echo "$monitor_result"
 
-   echo "$monitor_result"
-
-   template_screen='
+    template_screen='
 Section "Screen"
     Identifier "MyScreen"
     Device "MyVideoCard" 
@@ -270,33 +325,46 @@ Section "Screen"
     EndSubSection
 EndSection'
 
-   second_elements=()
+    second_elements=()
 
-   for sentence in "${filtered_output[@]}"; do
-      if [[ "$sentence" != "#"* ]]; then
-         second_element=$(echo "$sentence" | awk '{print $2}' | tr -d '"') 
+    for sentence in "${filtered_output[@]}"; do
+        # 跳过以 # 开头的行（已注释的 Modeline 或普通注释）
+        if [[ ! "$sentence" =~ [[:space:]]*# ]]; then
+            # 使用正则表达式直接提取分辨率参数（格式："WxH_FPS"）
+            if [[ "$sentence" =~ \ \"([0-9]+x[0-9]+_[0-9]+(\.[0-9]+)?)\" ]]; then
+                second_element="${BASH_REMATCH[1]}"
 
-         # 解析宽、高、刷新率
-         width=$(echo "$second_element" | cut -d'x' -f1)
-         height_refresh_rate=$(echo "$second_element" | cut -d'x' -f2)
+                # 解析宽、高、刷新率（整数部分）
+                width=$(echo "$second_element" | cut -d'x' -f1)
+                height_refresh=$(echo "$second_element" | cut -d'x' -f2)
+                height=$(echo "$height_refresh" | cut -d'_' -f1)
+                refresh_rate=$(echo "$height_refresh" | cut -d'_' -f2 | cut -d'.' -f1)
 
-         height=$(echo "$height_refresh_rate" | awk -F'_' '{print $1}')       
-         refresh_rate=$(echo "$height_refresh_rate" | awk -F'_' '{print $2}')
-
-         # 过滤条件
-         if ((height <= 1080 && width <= 1920 )); then
-            if [ -n "$second_element" ]; then
-               second_elements+=("\"$second_element\"")
+                # 验证是否为数字
+                if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]]; then
+                    # 应用过滤条件
+                    local max_pixel_area=$((1920 * 1080))  # 基准分辨率乘积
+                    local current_pixel_area=$((width * height))
+                  #   if (( width <= 1920 && height <= 1080 )); then
+                  if (( "$current_pixel_area" <= "$max_pixel_area" )); then
+                        # 去重：避免重复添加相同的模式
+                        if [[ ! " ${second_elements[@]} " =~ " \"$second_element\" " ]]; then
+                            second_elements+=("\"$second_element\"")
+                        fi
+                    fi
+                else
+                    echo "ERROR: Invalid resolution format: $second_element" >&2
+                fi
+            else
+                echo "WARN: Skipping non-Modeline line: $sentence" >&2
             fi
-         fi
-      fi
-   done
+        fi
+    done
 
-   IFS=$'\n' sorted_second_elements=($(sort -t'x' -k1,1nr -k2,2nr <<<"${second_elements[*]}"))
-   unset IFS
+   modes_string="$(printf '%s ' "${second_elements[@]}")"
+   modes_string="${modes_string% }"  # 去除末尾空格
 
-   modes_string="$(printf ' %s' "${sorted_second_elements[@]}")"
-
+   # 替换模板占位符
    result="${template_screen//#replace_2/$modes_string}"
 
    fbdev_temp='
@@ -306,10 +374,12 @@ Section "Device"
         Option "fbdev" "/dev/fb0"
 EndSection
 '
-   echo "$monitor_result" >/usr/share/X11/xorg.conf.d/01-monitor.conf
-   echo "$fbdev_temp" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
-   echo "$result" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
+       echo "$monitor_result" >/usr/share/X11/xorg.conf.d/01-monitor.conf
+       echo "$fbdev_temp" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
+       echo "$result" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
 }
+
+auto_edid
 timing_params=""
 function config_parse() {
    config_file="/boot/config.txt"
