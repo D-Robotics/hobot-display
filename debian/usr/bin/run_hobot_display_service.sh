@@ -269,7 +269,9 @@ filter_unsupported_modes() {
 
 
 function auto_edid() {
-    modes=$(get_edid_raw_data | edid-decode-linux-tv -X | grep "Modeline" | sed 's/^[ \t]*//g' | sed 's/.*/"&"/')
+    local edid_raw
+    edid_raw="$(get_edid_raw_data 2>/dev/null)"
+    modes=$(printf '%s' "$edid_raw" | edid-decode-linux-tv -X | grep "Modeline" | sed 's/^[ \t]*//g' | sed 's/.*/\"&\"/')
     if [ -z "$modes" ]; then
         #default timing genrate using https://tomverbeure.github.io/video_timings_calculator
         modes=("    Modeline \"1920x1080_30\" 74.25 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
@@ -360,6 +362,39 @@ EndSection'
             fi
         fi
     done
+
+   # Root-cause: second_elements preserves filtered_output order (EST/DMT/CEA),
+   # so Xorg defaults to the first entry (often 1024x768). Choose best mode
+   # dynamically (<= max_pixel_area, highest area then refresh), not hardcoded.
+   best_mode=""
+   best_area=0
+   best_refresh=0
+   for m in "${second_elements[@]}"; do
+        mm=${m//\"/}
+        w=${mm%%x*}
+        rest=${mm#*x}
+        h=${rest%%_*}
+        r=${rest#*_}
+        r_int=${r%%.*}
+        if [[ ! "$w" =~ ^[0-9]+$ || ! "$h" =~ ^[0-9]+$ || ! "$r_int" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        area=$((w * h))
+        if (( area > best_area || (area == best_area && r_int > best_refresh) )); then
+            best_mode="$m"
+            best_area=$area
+            best_refresh=$r_int
+        fi
+   done
+   if [[ -n "$best_mode" ]]; then
+        reordered=("$best_mode")
+        for m in "${second_elements[@]}"; do
+            if [[ "$m" != "$best_mode" ]]; then
+                reordered+=("$m")
+            fi
+        done
+        second_elements=("${reordered[@]}")
+   fi
 
    modes_string="$(printf '%s ' "${second_elements[@]}")"
    modes_string="${modes_string% }"  # 去除末尾空格
