@@ -211,13 +211,26 @@ static struct edid_cta_mode edid_cta_modes2[] = {
     {"Modeline \"4096x2160_120.00\" 1188 4096 4184 4272 4400 2160 2168 2178 2250 +HSync +VSync", "4096x2160@120Hz 256:135", 120, 270000, 1188000},
 };
 
+static int is_interlaced_cta_mode(const struct edid_cta_mode *mode)
+{
+    if (!mode || !mode->name)
+        return 0;
+    return strstr(mode->name, "i@") != NULL || strstr(mode->name, "Interlaced") != NULL;
+}
+
 static const struct edid_cta_mode *vic_to_mode(unsigned char vic)
 {
+    const struct edid_cta_mode *mode = NULL;
+
     if (vic > 0 && vic <= ARRAY_SIZE(edid_cta_modes1))
-        return edid_cta_modes1 + vic - 1;
-    if (vic >= 193 && vic <= ARRAY_SIZE(edid_cta_modes2) + 193)
-        return edid_cta_modes2 + vic - 193;
-    return NULL;
+        mode = edid_cta_modes1 + vic - 1;
+    else if (vic >= 193 && vic <= ARRAY_SIZE(edid_cta_modes2) + 193)
+        mode = edid_cta_modes2 + vic - 193;
+
+    if (is_interlaced_cta_mode(mode))
+        return NULL;
+
+    return mode;
 }
 
 struct dmt_videomode
@@ -848,6 +861,8 @@ int main()
     for (int i = 0; i < 4; i++, desc += 18) {
         struct detailed_timing dt;
         if (parse_detailed_timing(desc, &dt)) {
+            if (dt.interlaced)
+                continue;
             char modeline[256];
             generate_modeline(&dt, modeline, sizeof(modeline));
             printf("%s\n", modeline);
