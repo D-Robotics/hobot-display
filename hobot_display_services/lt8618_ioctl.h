@@ -93,6 +93,9 @@ int lt8618_get_edid_resolution_ratio(hobot_hdmi_sync_t * sync);
 int lt8618_set_hdmi_timing(hdmi_timing_t* sync);
 
 int lt8618_get_edid_data(edid_raw_t* edid);
+
+int lt8618_get_hdmi_connected(unsigned int* connected);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,7 @@ def parse_and_sort():
     sections = []
     current_section = []
     current_header = None
+    has_modeline = False
 
     # print("################ in parse_and_sort ################")
     # 需要排序的区块标识（严格匹配）
@@ -42,7 +43,6 @@ def parse_and_sort():
         
         entries = []
         other_lines = []
-        has_modeline = False
         for line in lines:
             # print(f"fuhua - check {line}")
             # 捕获 Modeline/ModeLine 行（兼容大小写和空格）

@@ -416,6 +416,58 @@ EndSection
 
 auto_edid
 timing_params=""
+EDID_MONITOR_LAST_CONNECT="0"
+EDID_MONITOR_LAST_EDID=""
+handle_edid_change_and_restart_lightdm() {
+   local hdmi_connect=""
+   local current_edid=""
+
+   hdmi_connect="$(get_hdmi_connect 2>/dev/null | tr -d '\r\n[:space:]')"
+   if [ "$hdmi_connect" != "1" ]; then
+      EDID_MONITOR_LAST_CONNECT="0"
+      return
+   fi
+
+   # Only handle EDID when connection changes from 0 to 1.
+   if [ "$EDID_MONITOR_LAST_CONNECT" = "1" ]; then
+      return
+   fi
+   EDID_MONITOR_LAST_CONNECT="1"
+
+   flash_hdmi_edid >/dev/null 2>&1
+   sleep 1
+   current_edid="$(get_edid_raw_data 2>/dev/null)"
+   if [ -z "$current_edid" ]; then
+      return
+   fi
+
+   if [ "$current_edid" != "$EDID_MONITOR_LAST_EDID" ]; then
+      EDID_MONITOR_LAST_EDID="$current_edid"
+      auto_edid
+      systemctl restart lightdm.service
+   fi
+}
+
+start_edid_monitor_background() {
+   local pid_file="/tmp/.edid_monitor_lightdm.pid"
+   local monitor_interval=2
+
+   if [ -f "$pid_file" ]; then
+      old_pid="$(cat "$pid_file" 2>/dev/null)"
+      if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+         return
+      fi
+   fi
+
+   (
+      while true; do
+         handle_edid_change_and_restart_lightdm
+         sleep "$monitor_interval"
+      done
+   ) >/dev/null 2>&1 &
+   echo "$!" >"$pid_file"
+}
+
 function config_parse() {
    config_file="/boot/config.txt"
    if [ ! -f $config_file ]; then
@@ -487,6 +539,8 @@ if [ $? -eq 0 ] && [ -n "$display_manager" ] && [ "$(systemctl get-default)" == 
    auto_edid
    echo desktop >/sys/devices/virtual/graphics/iar_cdev/iar_test_attr
    server_mode=0
+   start_edid_monitor_background
+   
 else
    echo "Server mode!"
    server_mode=1
