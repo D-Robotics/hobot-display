@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Hobot: Disable XFWM4 Compositor
+Comment=Disable compositor to avoid desktop right-click menu flicker on fbdev
+Exec=sh -c "/usr/bin/hobot-disable-xfwm4-compositor.sh; sleep 15; HOBOT_XFWM4_COMPOSITOR_DELAY=0 /usr/bin/hobot-disable-xfwm4-compositor.sh"
+TryExec=/usr/bin/hobot-disable-xfwm4-compositor.sh
+OnlyShowIn=XFCE;Xfce;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+
