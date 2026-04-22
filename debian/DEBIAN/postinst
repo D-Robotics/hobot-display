@@ -1,9 +1,4 @@
 #!/bin/bash
 
 systemctl enable hobot-display.service
-
-# Ensure autostart helper is executable (some packagers strip +x from data files)
-if [ -f /usr/bin/hobot-disable-xfwm4-compositor.sh ]; then
-	chmod 755 /usr/bin/hobot-disable-xfwm4-compositor.sh
-fi
 exit 0
