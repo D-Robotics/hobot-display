@@ -81,6 +81,20 @@ struct arguments
     int refresh_rate;
 };
 
+static void fill_iar_timing_cm480_defaults(hdmi_timing_t *t)
+{
+    memset(t, 0, sizeof(*t));
+    t->hfp = 89;
+    t->hbp = 61;
+    t->hs = 2;
+    t->vfp = 7;
+    t->vbp = 23;
+    t->vs = 2;
+    t->hact = 800;
+    t->vact = 480;
+    t->clk = 2900;
+}
+
 static char doc[] = "Userspace display service -- An service of display init";
 static struct argp_option options[] = {
     {"mode", 'm', "MODE", 0, "0: HDMI(BT1120), 1: MIPI_DSI"},
@@ -182,12 +196,12 @@ int main(int argc, char **argv)
     VOT_PUB_ATTR_S devAttr;
     VOT_CHN_ATTR_EX_S stChnAttrEx = {};
     hdmi_timing_t hdmi_timing;
+    memset(&hdmi_timing, 0, sizeof(hdmi_timing));
     memset(&args, 0, sizeof(args));
     argp_parse(&argp, argc, argv, 0, 0, &args);
     if (args.mode == 0)
     {
         lt8618_ioctl_init();
-        memset(&hdmi_timing, 0, sizeof(hdmi_timing));
 
         if (args.edid_auto_detect == 1)
         {
@@ -253,11 +267,47 @@ int main(int argc, char **argv)
     }
     else
     {
-        /**
-         * TODO: Add mipi dsi
-         *
-         */
-        ;
+        devAttr.enIntfSync = VO_OUTPUT_USER;
+        devAttr.u32BgColor = 0x108080;
+        devAttr.enOutputMode = HB_VOT_OUTPUT_MIPI;
+
+        memset(&iar_timing, 0, sizeof(iar_timing));
+        //printf("args.fb_width = %d, args.fb_height = %d, args.refresh_rate = %d\n", args.fb_width, args.fb_height, args.refresh_rate);
+        if (args.fb_width != 0 && args.fb_height != 0 && args.refresh_rate != 0)
+        {
+            findAndWriteMode(MODES_FILE, MODE_FILE, args.fb_width, args.fb_height, args.refresh_rate);
+            int fb_fd = open("/dev/fb0", O_RDWR);
+
+            if (fb_fd == -1)
+            {
+                perror("Error opening framebuffer device");
+                exit(EXIT_FAILURE);
+            }
+
+            struct fb_var_screeninfo var;
+
+            if (ioctl(fb_fd, FBIOGET_VSCREENINFO, &var))
+            {
+                perror("Error reading variable information");
+                close(fb_fd);
+                exit(EXIT_FAILURE);
+            }
+            iar_timing.hfp = var.right_margin;
+            iar_timing.hbp = var.left_margin;
+            iar_timing.vfp = var.lower_margin;
+            iar_timing.vbp = var.upper_margin;
+            iar_timing.hs = var.hsync_len;
+            iar_timing.vs = var.vsync_len;
+            iar_timing.clk = 100000000 / var.pixclock;
+            iar_timing.hact = var.xres;
+            iar_timing.vact = var.yres;
+            //printf("var.right_margin = %d, var.left_margin = %d, var.lower_margin = %d, var.upper_margin = %d, var.hsync_len = %d, var.vsync_len = %d, var.pixclock = %d, var.xres = %d, var.yres = %d\n", var.right_margin, var.left_margin, var.lower_margin, var.upper_margin, var.hsync_len, var.vsync_len, var.pixclock, var.xres, var.yres);
+            //printf("iar_timing.hfp = %d, iar_timing.hbp = %d, iar_timing.hs = %d, iar_timing.vfp = %d, iar_timing.vbp = %d, iar_timing.vs = %d, iar_timing.hact = %d, iar_timing.vact = %d, iar_timing.clk = %d\n", iar_timing.hfp, iar_timing.hbp, iar_timing.hs, iar_timing.vfp, iar_timing.vbp, iar_timing.vs, iar_timing.hact, iar_timing.vact, iar_timing.clk);    
+        }
+        else
+        {
+            fill_iar_timing_cm480_defaults(&iar_timing);
+        }
     }
 
     if(iar_timing.hact > 1080 || iar_timing.vact > 1920)

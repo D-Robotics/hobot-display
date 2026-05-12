@@ -414,9 +414,57 @@ EndSection
        echo "$result" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
 }
 
-auto_edid
+#auto_edid
 timing_params=""
 EDID_MONITOR_LAST_CONNECT="0"
+
+# kernel: drivers/soc/hobot/iar/hobot_iar.c — video_800x480_cm_touch + pixel_clk_video_800x480_cm (29 MHz)
+# disp_timing: hbp hfp hs | vbp vfp vs (vfp_cnt only used in-kernel)
+set_timing_params_cm480_mipi() {
+   timing_params="-h 800 -v 480 --hfp 89 --hs 2 --hbp 61 --vfp 7 --vs 2 --vbp 23 --clk 29000"
+}
+
+get_video_type_from_cmdline() {
+   local cl vt
+   cl=$(cat /proc/cmdline)
+   vt=$(echo "$cl" | awk -F' ' '{ for (i=1; i<=NF; i++) { if ($i ~ /^video=/) { sub("video=", "", $i); print $i } } }')
+   if [ -z "$vt" ]; then
+      echo "hdmi"
+   else
+      echo "$vt"
+   fi
+}
+
+# Xorg Modeline from same geometry: HTotal=952 VTotal=512 @ 29 MHz (~60 Hz)
+write_cm480_mipi_xorg_monitor_conf() {
+   local monitor_result fbdev_temp result
+   monitor_result='
+Section "Monitor"
+    Identifier "default"
+    Modeline "800x480_60" 29.0 800 889 891 952 480 487 489 512 +HSync +VSync
+EndSection
+'
+   fbdev_temp='
+Section "Device"
+    Identifier "MyVideoCard"
+    Driver "fbdev"
+        Option "fbdev" "/dev/fb0"
+EndSection
+'
+   result='
+Section "Screen"
+    Identifier "MyScreen"
+    Device "MyVideoCard"
+    Monitor "default"
+    DefaultDepth 24
+    SubSection "Display"
+        Modes "800x480_60"
+    EndSubSection
+EndSection'
+   echo "$monitor_result" >/usr/share/X11/xorg.conf.d/01-monitor.conf
+   echo "$fbdev_temp" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
+   echo "$result" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
+}
 EDID_MONITOR_LAST_EDID=""
 handle_edid_change_and_restart_lightdm() {
    local hdmi_connect=""
@@ -520,9 +568,13 @@ function cmd_line_parse() {
    fi
    # TODO: Support HDMI using custom timing
    if echo "$video_type" | grep -q "mipi"; then
-      echo "MIPI-DSI SCREEN"
+      echo "MIPI-DSI SCREEN (CM480 fixed timing, see hobot_iar.c video_800x480_cm_touch)"
       display_mode=1
-      config_parse
+      echo cm480p > /sys/devices/virtual/graphics/iar_cdev/iar_test_attr
+      echo disable0 > /sys/devices/virtual/graphics/iar_cdev/iar_test_attr
+      modprobe ft5406
+      modprobe hbx3_bl
+      set_timing_params_cm480_mipi
    fi
    server_env="-s $server_mode"
    params="$params -a 1 -m $display_mode $timing_params $server_env"
@@ -535,12 +587,17 @@ fi
 
 config_file="/boot/config.txt"
 
+video_type_boot="$(get_video_type_from_cmdline)"
+
 if [ $? -eq 0 ] && [ -n "$display_manager" ] && [ "$(systemctl get-default)" == "graphical.target" ]; then
-   auto_edid
+   if echo "$video_type_boot" | grep -q "mipi"; then
+      write_cm480_mipi_xorg_monitor_conf
+   else
+      auto_edid
+      start_edid_monitor_background
+   fi
    echo desktop >/sys/devices/virtual/graphics/iar_cdev/iar_test_attr
    server_mode=0
-   start_edid_monitor_background
-   
 else
    echo "Server mode!"
    server_mode=1
