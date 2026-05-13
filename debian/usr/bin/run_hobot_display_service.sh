@@ -466,12 +466,69 @@ EndSection'
    echo "$result" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
 }
 EDID_MONITOR_LAST_EDID=""
+
+is_edid_header_valid() {
+   local edid_raw="$1"
+   local -a edid_bytes
+   local header_tokens=""
+   local ext_count=0
+   local expected_count=0
+   local block=0
+   local i=0
+   local start=0
+   local sum=0
+   local bval=0
+
+   EDID_VALIDATE_ERR=""
+
+   # Use grep -E for portability; some awk variants may not support {2} as expected.
+   mapfile -t edid_bytes < <(printf '%s\n' "$edid_raw" | tr ' \t\r\n' '\n' | grep -Eio '^0x[0-9a-f][0-9a-f]$' | tr 'A-F' 'a-f')
+   if [ "${#edid_bytes[@]}" -lt 128 ]; then
+      EDID_VALIDATE_ERR="short_edid_tokens=${#edid_bytes[@]}"
+      return 1
+   fi
+
+   header_tokens="${edid_bytes[0]} ${edid_bytes[1]} ${edid_bytes[2]} ${edid_bytes[3]} ${edid_bytes[4]} ${edid_bytes[5]} ${edid_bytes[6]} ${edid_bytes[7]}"
+   if [ "$header_tokens" != "0x00 0xff 0xff 0xff 0xff 0xff 0xff 0x00" ]; then
+      EDID_VALIDATE_ERR="bad_header=[$header_tokens]"
+      return 1
+   fi
+
+   ext_count=$(( ${edid_bytes[126]} ))
+   expected_count=$((128 * (ext_count + 1)))
+   if [ "${#edid_bytes[@]}" -lt "$expected_count" ]; then
+      EDID_VALIDATE_ERR="short_for_extensions tokens=${#edid_bytes[@]} expected=$expected_count ext_count=$ext_count"
+      return 1
+   fi
+
+   for ((block = 0; block <= ext_count; block++)); do
+      start=$((block * 128))
+      sum=0
+      for ((i = 0; i < 128; i++)); do
+         bval=$(( ${edid_bytes[start + i]} ))
+         sum=$(((sum + bval) & 0xFF))
+      done
+      if [ "$sum" -ne 0 ]; then
+         EDID_VALIDATE_ERR="checksum_fail_block=$block sum=0x$(printf '%02x' "$sum")"
+         return 1
+      fi
+   done
+
+   return 0
+}
+
 handle_edid_change_and_restart_lightdm() {
    local hdmi_connect=""
    local current_edid=""
+   local edid_head=""
+   local retry_cnt=0
+   local max_retry=5
 
    hdmi_connect="$(get_hdmi_connect 2>/dev/null | tr -d '\r\n[:space:]')"
    if [ "$hdmi_connect" != "1" ]; then
+      if [ "$EDID_MONITOR_LAST_CONNECT" = "1" ]; then
+         echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: hdmi_connect=${hdmi_connect:-<empty>} -> set last_connect=0" >>/tmp/hobot-display.log
+      fi
       EDID_MONITOR_LAST_CONNECT="0"
       return
    fi
@@ -481,18 +538,51 @@ handle_edid_change_and_restart_lightdm() {
       return
    fi
    EDID_MONITOR_LAST_CONNECT="1"
+   echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: transition 0->1, start read EDID" >>/tmp/hobot-display.log
 
    flash_hdmi_edid >/dev/null 2>&1
-   sleep 1
+   sleep 0.5
    current_edid="$(get_edid_raw_data 2>/dev/null)"
-   if [ -z "$current_edid" ]; then
-      return
-   fi
+   while true; do
+      if [ -n "$current_edid" ] && is_edid_header_valid "$current_edid"; then
+         if [ "$retry_cnt" -eq 0 ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: Get edid succ (first read)" >>/tmp/hobot-display.log
+         else
+            echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: Get edid succ (retry ${retry_cnt}/${max_retry})" >>/tmp/hobot-display.log
+         fi
+         break
+      fi
+
+      if [ "$retry_cnt" -ge "$max_retry" ]; then
+         if [ -z "$current_edid" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: get_edid_raw_data empty after retries, reset last_connect=0 for next cycle" >>/tmp/hobot-display.log
+         else
+            edid_head="$(printf '%s\n' "$current_edid" | tr '\n' ' ' | awk '{print $1" "$2" "$3" "$4" "$5" "$6" "$7" "$8}')"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: invalid EDID [${EDID_VALIDATE_ERR:-unknown}] head8=[$edid_head] after retries, reset last_connect=0 for next cycle" >>/tmp/hobot-display.log
+         fi
+         EDID_MONITOR_LAST_CONNECT="0"
+         return
+      fi
+
+      retry_cnt=$((retry_cnt + 1))
+      if [ -z "$current_edid" ]; then
+         echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: EDID invalid/empty, retry ${retry_cnt}/${max_retry}, edid=<empty>" >>/tmp/hobot-display.log
+      else
+         edid_head="$(printf '%s\n' "$current_edid" | tr '\n' ' ' | awk '{print $1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "$10" "$11" "$12" "$13" "$14" "$15" "$16}')"
+         echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: EDID invalid/empty, retry ${retry_cnt}/${max_retry}, edid_head16=[$edid_head]" >>/tmp/hobot-display.log
+      fi
+      flash_hdmi_edid >/dev/null 2>&1
+      sleep 0.5
+      current_edid="$(get_edid_raw_data 2>/dev/null)"
+   done
 
    if [ "$current_edid" != "$EDID_MONITOR_LAST_EDID" ]; then
+      echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: EDID changed, trigger auto_edid + restart lightdm" >>/tmp/hobot-display.log
       EDID_MONITOR_LAST_EDID="$current_edid"
       auto_edid
       systemctl restart lightdm.service
+   else
+      echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: EDID unchanged, no action" >>/tmp/hobot-display.log
    fi
 }
 
