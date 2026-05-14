@@ -269,10 +269,17 @@ filter_unsupported_modes() {
 
 
 function auto_edid() {
-    local edid_raw
+    local edid_raw edid_decode_err edid_modeline_source edid_decode_err_msg
     edid_raw="$(get_edid_raw_data 2>/dev/null)"
-    modes=$(printf '%s' "$edid_raw" | edid-decode-linux-tv -X | grep "Modeline" | sed 's/^[ \t]*//g' | sed 's/.*/\"&\"/')
+    edid_decode_err="/tmp/hobot-display-edid-decode.stderr.$$"
+    edid_modeline_source="edid"
+    edid_decode_err_msg=""
+    modes=$(printf '%s' "$edid_raw" | edid-decode-linux-tv -X 2>"$edid_decode_err" | grep "Modeline" | sed 's/^[ \t]*//g' | sed 's/.*/\"&\"/')
     if [ -z "$modes" ]; then
+        edid_modeline_source="builtin_fallback"
+        if [ -s "$edid_decode_err" ]; then
+            edid_decode_err_msg=$(head -n 3 "$edid_decode_err")
+        fi
         #default timing genrate using https://tomverbeure.github.io/video_timings_calculator
         modes=("    Modeline \"1920x1080_30\" 74.25 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
         Modeline \"1920x1080_60\" 148.5 1920 2008 2052 2200 1080 1084 1089 1125 +HSync +VSync
@@ -284,6 +291,7 @@ function auto_edid() {
         Modeline \"640x480_75\" 31.5 640 656 720 840 480 481 484 500 -HSync -VSync"
         )
     fi
+    rm -f "$edid_decode_err"
     modes_array=()
     filtered_output=()
 
@@ -294,7 +302,17 @@ Section "Monitor"
 EndSection
 '
 
-    sorted_hobot_output=$(hobot_parse_std_timing | python3 /usr/bin/process_hobot_output.py)
+    # Root-cause fix:
+    # edid-decode -X "Modeline" lines are mostly DTDs; on some 4K monitors
+    # these can all be >1080p and later filtered out, leaving empty Modes.
+    # Merge EDID modelines with legacy standard timing source, then apply
+    # unified filtering/selection.
+    std_timing_output="$(hobot_parse_std_timing | python3 /usr/bin/process_hobot_output.py)"
+    if declare -p modes 2>/dev/null | grep -q 'declare \-a'; then
+        sorted_hobot_output="$(printf '%s\n' "${modes[@]}")"$'\n'"$std_timing_output"
+    else
+        sorted_hobot_output="$modes"$'\n'"$std_timing_output"
+    fi
     # echo "$sorted_hobot_output" >&2
     while IFS= read -r line; do
         modes_array+=("$line")
@@ -309,7 +327,7 @@ EndSection
 
     result=""
     for item in "${filtered_output[@]}"; do
-        result="$result$(echo "$item" | sed 's/^"\(.*\)"$/\1/')"$'\n'
+        result="$result    $(echo "$item" | sed 's/^"\(.*\)"$/\1/' | sed 's/^[[:space:]]*//')"$'\n'
     done
 
     monitor_result="${template_monitor//#replace_1/$result}"
@@ -344,15 +362,9 @@ EndSection'
 
                 # 验证是否为数字
                 if [[ "$width" =~ ^[0-9]+$ && "$height" =~ ^[0-9]+$ ]]; then
-                    # 应用过滤条件
-                    local max_pixel_area=$((1920 * 1080))  # 基准分辨率乘积
-                    local current_pixel_area=$((width * height))
-                  #   if (( width <= 1920 && height <= 1080 )); then
-                  if (( "$current_pixel_area" <= "$max_pixel_area" )); then
-                        # 去重：避免重复添加相同的模式
-                        if [[ ! " ${second_elements[@]} " =~ " \"$second_element\" " ]]; then
-                            second_elements+=("\"$second_element\"")
-                        fi
+                    # Deduplicate: do not add the same mode twice.
+                    if [[ ! " ${second_elements[@]} " =~ " \"$second_element\" " ]]; then
+                        second_elements+=("\"$second_element\"")
                     fi
                 else
                     echo "ERROR: Invalid resolution format: $second_element" >&2
@@ -363,9 +375,54 @@ EndSection'
         fi
     done
 
-   # Root-cause: second_elements preserves filtered_output order (EST/DMT/CEA),
-   # so Xorg defaults to the first entry (often 1024x768). Choose best mode
-   # dynamically (<= max_pixel_area, highest area then refresh), not hardcoded.
+   # For the final Modes list only: if same resolution has both standard
+   # and non-standard refresh rates, keep standard one(s) and drop
+   # non-standard one(s). If no standard exists for that resolution, keep all.
+   declare -A has_standard_refresh
+   modes_filtered=()
+   for m in "${second_elements[@]}"; do
+        mm=${m//\"/}
+        w=${mm%%x*}
+        rest=${mm#*x}
+        h=${rest%%_*}
+        r=${rest#*_}
+        r_dec=${r#*.}
+        if [[ "$r" == "$r_dec" ]]; then
+            r_dec=""
+        fi
+        if [[ ! "$w" =~ ^[0-9]+$ || ! "$h" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        wh_key="${w}x${h}"
+        if [[ -z "$r_dec" || "$r_dec" == "00" || "$r_dec" == "000" ]]; then
+            has_standard_refresh["$wh_key"]=1
+        fi
+   done
+
+   for m in "${second_elements[@]}"; do
+        mm=${m//\"/}
+        w=${mm%%x*}
+        rest=${mm#*x}
+        h=${rest%%_*}
+        r=${rest#*_}
+        r_dec=${r#*.}
+        if [[ "$r" == "$r_dec" ]]; then
+            r_dec=""
+        fi
+        if [[ ! "$w" =~ ^[0-9]+$ || ! "$h" =~ ^[0-9]+$ ]]; then
+            modes_filtered+=("$m")
+            continue
+        fi
+        wh_key="${w}x${h}"
+        if [[ -n "${has_standard_refresh[$wh_key]}" ]] && [[ -n "$r_dec" && "$r_dec" != "00" && "$r_dec" != "000" ]]; then
+            continue
+        fi
+        modes_filtered+=("$m")
+   done
+   second_elements=("${modes_filtered[@]}")
+
+   # Keep generic ordering only: choose best mode dynamically without
+   # hardcoded resolution preference.
    best_mode=""
    best_area=0
    best_refresh=0
@@ -401,6 +458,15 @@ EndSection'
 
    # 替换模板占位符
    result="${template_screen//#replace_2/$modes_string}"
+
+   {
+      echo "$(date '+%Y-%m-%d %H:%M:%S') auto_edid: trigger=${AUTO_EDID_TRIGGER_SOURCE:-unknown} modeline_source=${edid_modeline_source} edid_raw_chars=${#edid_raw} -> wrote /usr/share/X11/xorg.conf.d/01-monitor.conf"
+      echo "  Screen SubSection Display Modes (order = X default preference): ${modes_string:-<empty>}"
+      if [ -n "$edid_decode_err_msg" ]; then
+         echo "  edid-decode stderr (first lines, no Modeline matched):"
+         echo "$edid_decode_err_msg" | sed 's/^/    /'
+      fi
+   } >>/tmp/hobot-display.log
 
    fbdev_temp='
 Section "Device"
@@ -466,6 +532,7 @@ EndSection'
    echo "$result" >>/usr/share/X11/xorg.conf.d/01-monitor.conf
 }
 EDID_MONITOR_LAST_EDID=""
+AUTO_EDID_TRIGGER_SOURCE=""
 
 is_edid_header_valid() {
    local edid_raw="$1"
@@ -579,6 +646,7 @@ handle_edid_change_and_restart_lightdm() {
    if [ "$current_edid" != "$EDID_MONITOR_LAST_EDID" ]; then
       echo "$(date '+%Y-%m-%d %H:%M:%S') edid_monitor: EDID changed, trigger auto_edid + restart lightdm" >>/tmp/hobot-display.log
       EDID_MONITOR_LAST_EDID="$current_edid"
+      AUTO_EDID_TRIGGER_SOURCE="hotplug_monitor"
       auto_edid
       systemctl restart lightdm.service
    else
@@ -683,6 +751,7 @@ if [ $? -eq 0 ] && [ -n "$display_manager" ] && [ "$(systemctl get-default)" == 
    if echo "$video_type_boot" | grep -q "mipi"; then
       write_cm480_mipi_xorg_monitor_conf
    else
+      AUTO_EDID_TRIGGER_SOURCE="startup_once"
       auto_edid
       start_edid_monitor_background
    fi
